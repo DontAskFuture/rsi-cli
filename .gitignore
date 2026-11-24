@@ -1,0 +1,9 @@
+/target/
+/.rsi*/
+/.newsletter-state/
+**/node_modules/
+**/__pycache__/
+*.pyc
+.DS_Store
+.env
+.env.*

@@ -1,0 +1,34 @@
+[package]
+name = "rsi-cli"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/DontAskFuture/rsi-cli"
+description = "Spec and metric-driven Recursive Self-Improvement (RSI) CLI harness in Rust"
+
+[[bin]]
+name = "rsi"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+thiserror = "2.0"
+clap = { version = "4.5", features = ["derive", "env"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml_ng = "0.10"
+toml = "0.8"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+hex = "0.4"
+glob = "0.3"
+walkdir = "2.5"
+regex = "1.10"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+libc = "0.2"
+tempfile = "3.12"
+
+[dev-dependencies]

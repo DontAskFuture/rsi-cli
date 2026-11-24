@@ -1,0 +1,55 @@
+version: 1
+name: python-dedupe-demo
+language: python
+
+repo:
+  url: .
+  ref: HEAD
+  publish_on_complete: branch
+  target_branch: rsi/evolved
+
+spec:
+  file: ./specs/behavior.md
+  invariants:
+    - "Preserve exact first-seen order for all items"
+    - "Never mutate the caller's input list"
+  protected_paths:
+    - "tests/**"
+    - "benchmarks/**"
+    - "specs/**"
+    - "rsi.yaml"
+
+metrics:
+  blockers:
+    - id: acceptance_tests
+      command: "python3 -m unittest discover -s tests -p 'test_*.py'"
+      expect_exit_code: 0
+      timeout_sec: 60
+      on_breach: REVERT_STEP
+
+  objectives:
+    - id: ops_per_sec
+      command: "python3 benchmarks/bench.py"
+      extract_json_path: "$.ops_per_sec"
+      direction: MAXIMIZE
+      target: 5000
+      min_delta: 200
+      weight: 0.7
+      trials: 3
+
+    - id: p95_ms
+      command: "python3 benchmarks/bench.py"
+      extract_json_path: "$.p95_ms"
+      direction: MINIMIZE
+      target: 1.0
+      min_delta: 0.2
+      weight: 0.3
+      trials: 3
+
+evolution:
+  max_steps: 8
+  max_consecutive_reverts: 4
+
+agent:
+  driver: auto
+  max_turns: 8

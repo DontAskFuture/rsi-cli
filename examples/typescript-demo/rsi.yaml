@@ -1,0 +1,46 @@
+version: 1
+name: typescript-matcher-demo
+language: typescript
+
+repo:
+  url: .
+  ref: HEAD
+  publish_on_complete: branch
+  target_branch: rsi/evolved
+
+spec:
+  file: ./specs/behavior.md
+  invariants:
+    - "Preserve exact order of allowed events"
+    - "Never mutate input arrays"
+  protected_paths:
+    - "tests/**"
+    - "benchmarks/**"
+    - "specs/**"
+    - "rsi.yaml"
+
+metrics:
+  blockers:
+    - id: acceptance_tests
+      command: "node --no-warnings --experimental-strip-types --test tests/acceptance.test.ts"
+      expect_exit_code: 0
+      timeout_sec: 60
+      on_breach: REVERT_STEP
+
+  objectives:
+    - id: ops_per_sec
+      command: "node --no-warnings --experimental-strip-types benchmarks/bench.ts"
+      extract_json_path: "$.ops_per_sec"
+      direction: MAXIMIZE
+      target: 8000
+      min_delta: 200
+      weight: 1.0
+      trials: 3
+
+evolution:
+  max_steps: 8
+  max_consecutive_reverts: 4
+
+agent:
+  driver: auto
+  max_turns: 8

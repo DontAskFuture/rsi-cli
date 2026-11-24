@@ -1,0 +1,76 @@
+version: 1
+name: ai-engineer-newsletter-model-releases
+language: typescript
+
+repo:
+  url: https://github.com/DontAskFuture/AIEngineerNewsLetter.git
+  ref: main
+  publish_on_complete: bundle_only
+
+spec:
+  inline: |
+    Optimize `mergeWatchedModelReleases` and its internal matching/sorting helpers in
+    `packages/shared/src/model-releases.ts` for significantly higher throughput and lower p95 latency.
+
+    Constraints:
+    - Focus edits strictly on `packages/shared/src/model-releases.ts` (and `packages/shared/src/prompts.ts` only if strictly needed; prefer editing only `model-releases.ts`).
+    - Do not modify any test files or unrelated packages.
+    - Preserve 100% identical outputs, tie-breaking order, token matching, announcement deduping,
+      and public TypeScript exports/types.
+  invariants:
+    - "Outputs must remain byte-for-byte identical to Step 0 Golden-Master across all inputs"
+    - "All @ai-intel/shared unit tests and tsc --noEmit typechecks must pass"
+  protected_paths:
+    - "**/*.test.ts"
+    - "packages/db/drizzle/**"
+    - "packages/shared/package.json"
+    - "packages/shared/tsconfig.json"
+
+eval:
+  wrapper:
+    kind: ts_fn
+    target: "packages/shared/src/model-releases.ts:mergeWatchedModelReleases"
+    inputs: ./inputs.jsonl
+    equivalence: exact_output
+    warmup_iters: 4
+    measure_iters: 30
+    timeout_sec: 120
+
+metrics:
+  blockers:
+    - id: shared_unit_tests
+      command: "pnpm --dir packages/shared test"
+      expect_exit_code: 0
+      timeout_sec: 120
+      on_breach: REVERT_STEP
+
+    - id: shared_typecheck
+      command: "pnpm --dir packages/shared typecheck"
+      expect_exit_code: 0
+      timeout_sec: 120
+      on_breach: REVERT_STEP
+
+  objectives:
+    - id: ops_per_sec
+      builtin: ops_per_sec
+      direction: MAXIMIZE
+      target_ratio: 2.0
+      min_delta_ratio: 0.08
+      weight: 0.7
+      trials: 3
+
+    - id: p95_ms
+      builtin: p95_ms
+      direction: MINIMIZE
+      min_delta_ratio: 0.05
+      max_regression_tolerance: 0.5
+      weight: 0.3
+      trials: 3
+
+evolution:
+  max_steps: 3
+  max_consecutive_reverts: 3
+
+agent:
+  driver: agy_cli
+  max_turns: 8
