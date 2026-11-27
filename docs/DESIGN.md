@@ -327,9 +327,10 @@ export interface EvolutionMemory {
 
 | Command | Purpose | Key Flags |
 | :--- | :--- | :--- |
+| `rsi doctor` | Validates runtimes (`git`, `python3`, `node`, `tsx`), agent CLIs/keys (timeout-guarded), GitHub auth, and optional `rsi.yaml` | `--config`, `--json`, `--timeout-sec` |
 | `rsi init` | Scaffolds `rsi.yaml`, spec template, and optional GitHub Action workflow | `--lang`, `--dir`, `--ci` |
 | `rsi bootstrap-eval` | Inspects a bare legacy repo out-of-tree and builds a Golden-Master Eval Pack | `--repo`, `--spec`, `--target`, `--wrapper`, `--target-ratio` |
-| `rsi evolve` | Clones repo, runs Step `0..max_steps` loop (auto-bootstraps if no `rsi.yaml`) | `--repo`, `--config`, `--spec`, `--publish pull-request\|zero-pr\|bundle-only`, `--auto-merge` |
+| `rsi evolve` | Clones repo, runs Step `0..max_steps` loop (auto-bootstraps if no `rsi.yaml`) | `--repo`, `--config`, `--dry-run`, `--resume`, `--paired-ab-trials`, `--max-repair-turns`, `--publish`, `--auto-merge`, `--quiet` |
 | `rsi publish [<run_id>]` | Publishes an already-completed run to GitHub as a PR or Zero-PR trunk push | `--mode pull-request\|zero-pr\|branch\|tag`, `--auto-merge`, `--base-branch` |
 | `rsi status [<run_id>]` | Shows current step, `baseline -> best -> target` scorecard, and revert count | `--json` |
 | `rsi diff [<run_id>]` | **Optional Diff View:** net diff from `base_sha` to `best_sha` (hides reverted dead-ends) | `--step <n>`, `--view unified\|semantic` |
@@ -427,7 +428,8 @@ To handle both well-tested repositories and untouched legacy codebases (zero tes
 
 ## 7. v1 Implementation Stack (Finalized)
 
-1. **Rust Harness (`rsi-cli`):** Compiled single-binary CLI (`rsi`) built in Rust with embedded SQLite (`rusqlite`) for the `EvolutionRun` / `StepAttempt` / `EvolutionMemory` ledger and native bare-Git + worktree management.
+1. **Rust Harness (`rsi-cli`):** Compiled single-binary CLI (`rsi`) built in Rust with embedded SQLite (`rusqlite`) for the `EvolutionRun` / `StepAttempt` / `EvolutionMemory` ledger, resumable execution (`--resume`), live stderr progress telemetry, and native bare-Git + worktree management.
 2. **Python & TypeScript Workspace Adapters:** Auto-detects target repo language (`pyproject.toml` / `requirements.txt` / `*.py` vs. `tsconfig.json` / `package.json`), prepares isolated worktrees without redundant dependency reinstalls (`.venv` / `PYTHONPATH` propagation for Python; `node_modules` symlink + `.bin` `PATH` injection + Node 22 native TS execution for TypeScript), and generates tailored starter configs via `rsi init --lang python|typescript`.
-3. **Dual Customer Auth (`SynthesizerDriver`):** Supports both existing coding-agent subscriptions (`claude -p`, `codex exec`, `gemini -p`) and direct BYO LLM API keys (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY` / `GOOGLE_API_KEY`, `OPENAI_API_KEY`) via a bounded worktree-scoped tool-use loop, plus custom `command` drivers.
-4. **Local Git Worktree Sandbox:** Uses disposable `git worktree` checkouts per step, locks `protected_paths` read-only (`0o444`) during synthesis, verifies out-of-tree SHA-256 checksums before evaluation, and isolates subprocess timeouts via Unix process-group kills (`process_group(0)` + `SIGKILL`).
+3. **Dual Customer Auth & Health Checks (`SynthesizerDriver`):** Supports both existing coding-agent subscriptions (`agy -p`, `claude -p`, `codex exec`, `gemini -p`) and direct BYO LLM API keys (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY` / `GOOGLE_API_KEY`, `OPENAI_API_KEY`) via a bounded worktree-scoped tool-use loop, plus custom `command` drivers. `rsi doctor` and `resolve_driver_checked` probe CLIs under strict process-group timeouts so hung or missing tools are skipped cleanly.
+4. **Statistical Promotion & Repair Kernel:** Step 0 calibrates IQR noise floors (`calibrate_noise_floors`), candidate blocker failures trigger up to `max_repair_turns` in-worktree repair turns with head+tail failure logs and candidate diffs before reverting, and screening wins undergo alternating interleaved A/B confirmation (`evaluate_paired_ab`) prior to promotion.
+5. **Local Git Worktree Sandbox:** Uses disposable `git worktree` checkouts per step, locks `protected_paths` read-only (`0o444`) during synthesis, verifies out-of-tree SHA-256 checksums before evaluation, and isolates subprocess timeouts via Unix process-group kills (`process_group(0)` + `SIGKILL`).

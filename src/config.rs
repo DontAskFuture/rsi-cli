@@ -192,6 +192,9 @@ pub fn validate_config(cfg: &RsiConfig) -> Result<()> {
     if cfg.evolution.max_consecutive_reverts == 0 {
         bail!("evolution.max_consecutive_reverts must be >= 1");
     }
+    if cfg.evolution.noise_multiplier < 0.0 {
+        bail!("evolution.noise_multiplier must be >= 0");
+    }
     if cfg.agent.driver == DriverKind::Command && cfg.agent.command.as_deref().unwrap_or("").trim().is_empty() {
         bail!("agent.command must be set when agent.driver is 'command'");
     }

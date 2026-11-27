@@ -175,6 +175,13 @@ pub async fn run_gemini_cli(
     })
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct CommandDriverMeta<'a> {
+    pub repair_turn: usize,
+    pub failed_blocker: Option<&'a str>,
+    pub failure_output: Option<&'a str>,
+}
+
 pub async fn run_command_driver(
     worktree: &Path,
     prompt: &str,
@@ -182,20 +189,61 @@ pub async fn run_command_driver(
     command_str: &str,
     prompt_dir: &Path,
 ) -> Result<SynthesisOutput> {
+    run_command_driver_with_meta(
+        worktree,
+        prompt,
+        step_number,
+        command_str,
+        prompt_dir,
+        &CommandDriverMeta::default(),
+    )
+    .await
+}
+
+pub async fn run_command_driver_with_meta(
+    worktree: &Path,
+    prompt: &str,
+    step_number: usize,
+    command_str: &str,
+    prompt_dir: &Path,
+    meta: &CommandDriverMeta<'_>,
+) -> Result<SynthesisOutput> {
     std::fs::create_dir_all(prompt_dir)?;
-    let prompt_file = prompt_dir.join(format!("step_{step_number}_prompt.md"));
+    let prompt_file = if meta.repair_turn > 0 {
+        prompt_dir.join(format!(
+            "step_{step_number}_repair_{}_prompt.md",
+            meta.repair_turn
+        ))
+    } else {
+        prompt_dir.join(format!("step_{step_number}_prompt.md"))
+    };
     std::fs::write(&prompt_file, prompt)?;
 
-    let out = tokio::process::Command::new("sh")
-        .arg("-c")
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c")
         .arg(command_str)
         .current_dir(worktree)
         .env("RSI_STEP", step_number.to_string())
+        .env("RSI_REPAIR_TURN", meta.repair_turn.to_string())
         .env("RSI_WORKTREE", worktree.to_string_lossy().as_ref())
         .env("RSI_PROMPT_FILE", prompt_file.to_string_lossy().as_ref())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    if let Some(blocker_id) = meta.failed_blocker {
+        cmd.env("RSI_FAILED_BLOCKER", blocker_id);
+    }
+    if let Some(failure) = meta.failure_output {
+        let failure_file = prompt_dir.join(format!(
+            "step_{step_number}_repair_{}_failure.txt",
+            meta.repair_turn
+        ));
+        std::fs::write(&failure_file, failure)?;
+        cmd.env("RSI_FAILURE_FILE", failure_file.to_string_lossy().as_ref());
+    }
+
+    let out = cmd
         .output()
         .await
         .with_context(|| format!("failed to execute custom agent command: {command_str}"))?;

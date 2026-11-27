@@ -1,13 +1,14 @@
 use crate::bootstrap::{self, BootstrapOptions};
 use crate::config;
 use crate::diff::{self, DiffView};
+use crate::doctor;
 use crate::kernel::{self, RunOptions};
 use crate::lang;
 use crate::ledger::{self, Ledger};
 use crate::models::{DriverKind, PublishMode, RepoLanguage, StepOutcome, WrapperKind};
 use crate::publish::{self, PublishRequest};
 use crate::watch;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -114,6 +115,15 @@ impl From<WrapperArg> for WrapperKind {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    /// Diagnose local runtimes, coding agent CLIs/keys, GitHub credentials, and optional rsi.yaml
+    Doctor {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "4")]
+        timeout_sec: u64,
+    },
     /// Scaffold starter rsi.yaml and behavioral spec for a Python or TypeScript repo
     Init {
         #[arg(long, value_enum, default_value = "auto")]
@@ -176,6 +186,16 @@ pub enum Commands {
         auto_merge: bool,
         #[arg(long)]
         force_push: bool,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        resume: Option<String>,
+        #[arg(long)]
+        paired_ab_trials: Option<usize>,
+        #[arg(long)]
+        max_repair_turns: Option<usize>,
+        #[arg(long)]
+        quiet: bool,
         #[arg(long)]
         state_dir: Option<PathBuf>,
     },
@@ -243,6 +263,26 @@ pub enum Commands {
 pub async fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Commands::Doctor {
+            config,
+            json,
+            timeout_sec,
+        } => {
+            let discovered_cfg = config.or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|cwd| config::discover_config_in(&cwd))
+            });
+            let report = doctor::run_doctor(discovered_cfg.as_deref(), timeout_sec).await;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", doctor::format_doctor_text(&report));
+            }
+            if !report.ok {
+                bail!("rsi doctor detected setup issues");
+            }
+        }
         Commands::Init {
             lang,
             dir,
@@ -311,6 +351,11 @@ pub async fn run_cli() -> Result<()> {
             github_repo,
             auto_merge,
             force_push,
+            dry_run,
+            resume,
+            paired_ab_trials,
+            max_repair_turns,
+            quiet,
             state_dir,
         } => {
             let state = state_dir.unwrap_or_else(ledger::default_state_dir);
@@ -340,7 +385,7 @@ pub async fn run_cli() -> Result<()> {
                     boot.config_path
                 }
             };
-            let run = kernel::run_evolution(RunOptions {
+            let run_opts = RunOptions {
                 config_path: cfg_path,
                 state_dir: state.clone(),
                 repo_override: repo,
@@ -355,8 +400,23 @@ pub async fn run_cli() -> Result<()> {
                 auto_merge_override: auto_merge,
                 force_push_override: force_push,
                 gh_bin_override: None,
-            })
-            .await?;
+                dry_run,
+                quiet,
+                paired_ab_trials_override: paired_ab_trials,
+                max_repair_turns_override: max_repair_turns,
+                resume_run_id: resume,
+            };
+
+            if dry_run {
+                let report = kernel::run_dry_run(run_opts).await?;
+                print_dry_run_report(&report);
+                if !report.blockers_passed {
+                    bail!("dry-run baseline blockers failed");
+                }
+                return Ok(());
+            }
+
+            let run = kernel::run_evolution(run_opts).await?;
 
             let ledger = Ledger::open(&state)?;
             let steps = ledger.list_steps(&run.id)?;
@@ -452,9 +512,14 @@ pub async fn run_cli() -> Result<()> {
                 if only_promoted && s.outcome != StepOutcome::Promoted {
                     continue;
                 }
+                let repair_tag = if s.repair_turns > 0 {
+                    format!(", {} repair turn(s)", s.repair_turns)
+                } else {
+                    String::new()
+                };
                 println!(
-                    "  Step {:02} [{}] ({}ms) — {}",
-                    s.step_number, s.outcome, s.duration_ms, s.hypothesis
+                    "  Step {:02} [{}] ({}ms{}) — {}",
+                    s.step_number, s.outcome, s.duration_ms, repair_tag, s.hypothesis
                 );
                 if let Some(ref rev) = s.revert_record {
                     println!("      Reverted ({:?}): {}", rev.reason, rev.detail);
@@ -531,4 +596,56 @@ fn print_run_summary(run: &crate::models::EvolutionRun, steps: &[crate::models::
         println!("  - {k}: {base_v:.4} -> {best_v:.4}");
     }
     println!("Inspect clean diff: rsi diff {}", run.id);
+}
+
+fn print_dry_run_report(report: &crate::models::DryRunReport) {
+    println!("RSI Dry Run: {} ({})", report.name, report.repo_url);
+    println!(
+        "Base SHA: {} | Language: {} | Resolved Driver: {} | Protected files: {}",
+        &report.base_sha[..8.min(report.base_sha.len())],
+        report.language,
+        report.resolved_driver,
+        report.protected_files_count
+    );
+    println!(
+        "Blockers: {} ({} checked)",
+        if report.blockers_passed { "PASSED" } else { "FAILED" },
+        report.blocker_results.len()
+    );
+    for b in &report.blocker_results {
+        println!(
+            "  - {} [{}] ({}ms)",
+            b.metric_id,
+            if b.passed { "pass" } else { "FAIL" },
+            b.duration_ms
+        );
+        if !b.passed && !b.output_excerpt.is_empty() {
+            println!("    {}", b.output_excerpt);
+        }
+    }
+    if !report.objectives_summary.is_empty() {
+        println!("Baseline Objectives & Noise Calibration:");
+        for o in &report.objectives_summary {
+            let target_s = o
+                .target
+                .map(|t| format!("{t:.4}"))
+                .unwrap_or_else(|| "-".into());
+            let iqr_s = report
+                .noise_stats
+                .iter()
+                .find(|n| n.metric_id == o.id)
+                .map(|n| format!(" | IQR={:.4}", n.iqr))
+                .unwrap_or_default();
+            println!(
+                "  - {} ({:?}): baseline={:.4}, target={}, min_delta={:.4} -> calibrated={:.4}{}",
+                o.id,
+                o.direction,
+                o.baseline,
+                target_s,
+                o.configured_min_delta,
+                o.calibrated_min_delta,
+                iqr_s
+            );
+        }
+    }
 }

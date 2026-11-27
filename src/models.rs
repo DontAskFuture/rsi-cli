@@ -328,6 +328,14 @@ pub struct EvolutionPolicy {
     pub max_consecutive_reverts: usize,
     #[serde(default)]
     pub max_budget_usd: Option<f64>,
+    #[serde(default = "default_paired_ab_trials")]
+    pub paired_ab_trials: usize,
+    #[serde(default = "default_noise_calibration")]
+    pub noise_calibration: bool,
+    #[serde(default = "default_noise_multiplier")]
+    pub noise_multiplier: f64,
+    #[serde(default = "default_max_repair_turns")]
+    pub max_repair_turns: usize,
 }
 
 impl Default for EvolutionPolicy {
@@ -336,6 +344,10 @@ impl Default for EvolutionPolicy {
             max_steps: default_max_steps(),
             max_consecutive_reverts: default_max_consecutive_reverts(),
             max_budget_usd: None,
+            paired_ab_trials: default_paired_ab_trials(),
+            noise_calibration: default_noise_calibration(),
+            noise_multiplier: default_noise_multiplier(),
+            max_repair_turns: default_max_repair_turns(),
         }
     }
 }
@@ -346,6 +358,22 @@ fn default_max_steps() -> usize {
 
 fn default_max_consecutive_reverts() -> usize {
     5
+}
+
+fn default_paired_ab_trials() -> usize {
+    3
+}
+
+fn default_noise_calibration() -> bool {
+    true
+}
+
+fn default_noise_multiplier() -> f64 {
+    1.5
+}
+
+fn default_max_repair_turns() -> usize {
+    1
 }
 
 /// Customer-provided coding agent subscription or LLM API driver.
@@ -614,9 +642,60 @@ pub struct StepAttempt {
     pub blocker_results: Vec<BlockerResult>,
     pub objective_measurements: Vec<ObjectiveMeasurement>,
     pub revert_record: Option<RevertRecord>,
+    #[serde(default)]
+    pub repair_turns: usize,
     pub cost_usd: f64,
     pub duration_ms: u64,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricNoiseStats {
+    pub metric_id: String,
+    pub median: f64,
+    pub min: f64,
+    pub max: f64,
+    pub iqr: f64,
+    pub rel_spread: f64,
+    pub calibrated_min_delta: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairedAbMetricResult {
+    pub metric_id: String,
+    pub best_values: Vec<f64>,
+    pub cand_values: Vec<f64>,
+    pub paired_deltas: Vec<f64>,
+    pub median_delta: f64,
+    pub best_median: f64,
+    pub cand_median: f64,
+    pub wins: usize,
+    pub losses: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DryRunObjectiveSummary {
+    pub id: String,
+    pub direction: Direction,
+    pub baseline: f64,
+    pub target: Option<f64>,
+    pub configured_min_delta: f64,
+    pub calibrated_min_delta: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DryRunReport {
+    pub name: String,
+    pub repo_url: String,
+    pub base_sha: String,
+    pub language: RepoLanguage,
+    pub resolved_driver: String,
+    pub protected_files_count: usize,
+    pub blockers_passed: bool,
+    pub blocker_results: Vec<BlockerResult>,
+    pub baseline_scorecard: BTreeMap<String, f64>,
+    pub noise_stats: Vec<MetricNoiseStats>,
+    pub objectives_summary: Vec<DryRunObjectiveSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

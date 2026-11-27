@@ -360,19 +360,20 @@ def main():
             idx = item["index"]
             expected = item["output"]
             actual = to_canon(invoke_case(fn, copy.deepcopy(cases[idx])))
+            case_preview = json.dumps(to_canon(cases[idx]))[:320]
             if args.equiv == "status_only":
                 continue
             elif args.equiv == "json_subset":
                 if not is_subset(expected, actual):
                     print(
-                        f"Golden subset mismatch at case {idx}:\n  expected subset: {json.dumps(expected)[:240]}\n  actual: {json.dumps(actual)[:240]}",
+                        f"Golden subset mismatch at case {idx}:\n  input: {case_preview}\n  expected subset: {json.dumps(expected)[:320]}\n  actual: {json.dumps(actual)[:320]}",
                         file=sys.stderr,
                     )
                     sys.exit(1)
             else:
                 if actual != expected:
                     print(
-                        f"Golden output mismatch at case {idx}:\n  expected: {json.dumps(expected)[:240]}\n  actual: {json.dumps(actual)[:240]}",
+                        f"Golden output mismatch at case {idx}:\n  input: {case_preview}\n  expected: {json.dumps(expected)[:320]}\n  actual: {json.dumps(actual)[:320]}",
                         file=sys.stderr,
                     )
                     sys.exit(1)
@@ -560,16 +561,19 @@ async function main() {
     const golden = JSON.parse(fs.readFileSync(args.golden, "utf8"));
     for (const item of golden) {
       const actual = canonicalize(await invokeCase(fn, structuredClone(cases[item.index])));
+      const casePreview = JSON.stringify(canonicalize(cases[item.index])).slice(0, 320);
       if (args.equiv === "status_only") continue;
       if (args.equiv === "json_subset") {
         if (!isSubset(item.output, actual)) {
-          console.error(`Golden subset mismatch at case ${item.index}`);
+          console.error(
+            `Golden subset mismatch at case ${item.index}:\n  input: ${casePreview}\n  expected subset: ${JSON.stringify(item.output).slice(0, 320)}\n  actual: ${JSON.stringify(actual).slice(0, 320)}`
+          );
           process.exit(1);
         }
       } else {
         if (JSON.stringify(actual) !== JSON.stringify(item.output)) {
           console.error(
-            `Golden mismatch at case ${item.index}:\n  expected: ${JSON.stringify(item.output).slice(0, 240)}\n  actual: ${JSON.stringify(actual).slice(0, 240)}`
+            `Golden mismatch at case ${item.index}:\n  input: ${casePreview}\n  expected: ${JSON.stringify(item.output).slice(0, 320)}\n  actual: ${JSON.stringify(actual).slice(0, 320)}`
           );
           process.exit(1);
         }

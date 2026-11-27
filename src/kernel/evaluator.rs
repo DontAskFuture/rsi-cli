@@ -1,7 +1,7 @@
 use crate::lang::WorktreeEnv;
 use crate::models::{
-    BlockerMetric, BlockerResult, CmpOp, Direction, ObjectiveMeasurement, ObjectiveMetric,
-    RevertReason,
+    BlockerMetric, BlockerResult, CmpOp, Direction, MetricNoiseStats, ObjectiveMeasurement,
+    ObjectiveMetric, PairedAbMetricResult, RevertReason,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use regex::Regex;
@@ -159,7 +159,7 @@ pub async fn evaluate_blockers(
         let combined = format!("{}\n{}", out.stdout.trim(), out.stderr.trim())
             .trim()
             .to_string();
-        let excerpt = truncate_chars(&combined, 500);
+        let excerpt = excerpt_head_tail(&combined, 2400);
 
         let res = BlockerResult {
             metric_id: b.id.clone(),
@@ -179,13 +179,12 @@ pub async fn evaluate_blockers(
     Ok((true, results, None))
 }
 
-/// Evaluates objective metrics with command deduplication and median aggregation over `trials`.
-pub async fn evaluate_objectives(
+fn group_objective_commands(
     objectives: &[ObjectiveMetric],
-    worktree: &Path,
-    env: &WorktreeEnv,
-    run_dir: &Path,
-) -> Result<(Vec<ObjectiveMeasurement>, BTreeMap<String, f64>)> {
+) -> (
+    Vec<(String, Option<std::path::PathBuf>, u64)>,
+    HashMap<(String, Option<std::path::PathBuf>, u64), Vec<usize>>,
+) {
     let mut grouped_indices: HashMap<(String, Option<std::path::PathBuf>, u64), Vec<usize>> =
         HashMap::new();
     let mut group_order: Vec<(String, Option<std::path::PathBuf>, u64)> = Vec::new();
@@ -197,7 +196,33 @@ pub async fn evaluate_objectives(
         }
         grouped_indices.entry(key).or_default().push(idx);
     }
+    (group_order, grouped_indices)
+}
 
+fn extract_objective_value(obj: &ObjectiveMetric, stdout: &str) -> Result<f64> {
+    if let Some(ref jp) = obj.extract_json_path {
+        extract_json_path(stdout, jp).with_context(|| {
+            format!(
+                "failed extracting json path '{}' for metric '{}'",
+                jp, obj.id
+            )
+        })
+    } else if let Some(ref rx) = obj.extract_regex {
+        extract_regex(stdout, rx)
+            .with_context(|| format!("failed extracting regex '{}' for metric '{}'", rx, obj.id))
+    } else {
+        bail!("objective '{}' has no extractor", obj.id)
+    }
+}
+
+/// Evaluates objective metrics with command deduplication and median aggregation over `trials`.
+pub async fn evaluate_objectives(
+    objectives: &[ObjectiveMetric],
+    worktree: &Path,
+    env: &WorktreeEnv,
+    run_dir: &Path,
+) -> Result<(Vec<ObjectiveMeasurement>, BTreeMap<String, f64>)> {
+    let (group_order, grouped_indices) = group_objective_commands(objectives);
     let mut trial_samples: Vec<Vec<f64>> = vec![Vec::new(); objectives.len()];
 
     for key in group_order {
@@ -228,20 +253,7 @@ pub async fn evaluate_objectives(
                 if trial >= obj.trials.max(1) {
                     continue;
                 }
-                let val = if let Some(ref jp) = obj.extract_json_path {
-                    extract_json_path(&out.stdout, jp).with_context(|| {
-                        format!(
-                            "failed extracting json path '{}' for metric '{}'",
-                            jp, obj.id
-                        )
-                    })?
-                } else if let Some(ref rx) = obj.extract_regex {
-                    extract_regex(&out.stdout, rx).with_context(|| {
-                        format!("failed extracting regex '{}' for metric '{}'", rx, obj.id)
-                    })?
-                } else {
-                    bail!("objective '{}' has no extractor", obj.id);
-                };
+                let val = extract_objective_value(obj, &out.stdout)?;
                 trial_samples[idx].push(val);
             }
         }
@@ -261,6 +273,229 @@ pub async fn evaluate_objectives(
     }
 
     Ok((measurements, scorecard))
+}
+
+/// Calibrates each objective's `min_delta` floor using Step-0 baseline IQR noise statistics.
+pub fn calibrate_noise_floors(
+    objectives: &mut [ObjectiveMetric],
+    baseline_measurements: &[ObjectiveMeasurement],
+    noise_multiplier: f64,
+) -> Vec<MetricNoiseStats> {
+    let mut stats = Vec::with_capacity(objectives.len());
+    for obj in objectives.iter_mut() {
+        let Some(meas) = baseline_measurements.iter().find(|m| m.metric_id == obj.id) else {
+            continue;
+        };
+        if meas.trial_values.is_empty() {
+            continue;
+        }
+        let mut sorted = meas.trial_values.clone();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let min_v = sorted[0];
+        let max_v = sorted[sorted.len() - 1];
+        let med = median(&sorted);
+        let q1 = percentile(&sorted, 0.25);
+        let q3 = percentile(&sorted, 0.75);
+        let iqr = (q3 - q1).max(0.0);
+        let rel_spread = iqr / med.abs().max(1e-9);
+
+        if sorted.len() >= 2 && noise_multiplier > 0.0 {
+            let noise_floor = iqr * noise_multiplier;
+            if noise_floor > obj.min_delta {
+                obj.min_delta = noise_floor;
+            }
+        }
+
+        stats.push(MetricNoiseStats {
+            metric_id: obj.id.clone(),
+            median: med,
+            min: min_v,
+            max: max_v,
+            iqr,
+            rel_spread,
+            calibrated_min_delta: obj.min_delta,
+        });
+    }
+    stats
+}
+
+/// Evaluates `best` and `candidate` worktrees back-to-back in alternating interleaved rounds (`A,B`, `B,A`, ...).
+pub async fn evaluate_paired_ab(
+    objectives: &[ObjectiveMetric],
+    best_worktree: &Path,
+    best_env: &WorktreeEnv,
+    cand_worktree: &Path,
+    cand_env: &WorktreeEnv,
+    run_dir: &Path,
+    rounds: usize,
+) -> Result<Vec<PairedAbMetricResult>> {
+    if rounds == 0 || objectives.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let (group_order, grouped_indices) = group_objective_commands(objectives);
+    let mut best_samples: Vec<Vec<f64>> = vec![Vec::with_capacity(rounds); objectives.len()];
+    let mut cand_samples: Vec<Vec<f64>> = vec![Vec::with_capacity(rounds); objectives.len()];
+
+    for key in group_order {
+        let indices = &grouped_indices[&key];
+        let best_cwd = key.1.as_deref().unwrap_or(best_worktree);
+        let cand_cwd = key.1.as_deref().unwrap_or(cand_worktree);
+
+        for round in 0..rounds {
+            let (best_out, cand_out) = if round % 2 == 0 {
+                let b = run_shell_command_in(&key.0, best_cwd, best_worktree, best_env, run_dir, key.2).await?;
+                let c = run_shell_command_in(&key.0, cand_cwd, cand_worktree, cand_env, run_dir, key.2).await?;
+                (b, c)
+            } else {
+                let c = run_shell_command_in(&key.0, cand_cwd, cand_worktree, cand_env, run_dir, key.2).await?;
+                let b = run_shell_command_in(&key.0, best_cwd, best_worktree, best_env, run_dir, key.2).await?;
+                (b, c)
+            };
+
+            for (label, out) in [("baseline", &best_out), ("candidate", &cand_out)] {
+                if out.timed_out {
+                    bail!("paired A/B {label} command timed out after {}s: {}", key.2, key.0);
+                }
+                if out.exit_code != Some(0) {
+                    bail!(
+                        "paired A/B {label} command failed (exit {:?}): {}\n{}",
+                        out.exit_code,
+                        key.0,
+                        truncate_chars(&format!("{}\n{}", out.stdout, out.stderr), 400)
+                    );
+                }
+            }
+
+            for &idx in indices {
+                let obj = &objectives[idx];
+                let b_val = extract_objective_value(obj, &best_out.stdout)?;
+                let c_val = extract_objective_value(obj, &cand_out.stdout)?;
+                best_samples[idx].push(b_val);
+                cand_samples[idx].push(c_val);
+            }
+        }
+    }
+
+    let mut results = Vec::with_capacity(objectives.len());
+    for (idx, obj) in objectives.iter().enumerate() {
+        let b_vals = &best_samples[idx];
+        let c_vals = &cand_samples[idx];
+        let deltas: Vec<f64> = b_vals
+            .iter()
+            .zip(c_vals.iter())
+            .map(|(&b, &c)| match obj.effective_direction() {
+                Direction::Maximize => c - b,
+                Direction::Minimize => b - c,
+            })
+            .collect();
+        let wins = deltas.iter().filter(|&&d| d > 0.0).count();
+        let losses = deltas.iter().filter(|&&d| d < 0.0).count();
+
+        results.push(PairedAbMetricResult {
+            metric_id: obj.id.clone(),
+            best_values: b_vals.clone(),
+            cand_values: c_vals.clone(),
+            median_delta: median(&deltas),
+            paired_deltas: deltas,
+            best_median: median(b_vals),
+            cand_median: median(c_vals),
+            wins,
+            losses,
+        });
+    }
+
+    Ok(results)
+}
+
+/// Judges interleaved paired A/B results so noisy or inconsistent fluctuations do not promote.
+pub fn judge_paired_ab(
+    objectives: &[ObjectiveMetric],
+    results: &[PairedAbMetricResult],
+) -> CandidateJudgment {
+    if objectives.is_empty() || results.is_empty() {
+        return CandidateJudgment::Promoted;
+    }
+
+    let mut any_meaningful_gain = false;
+    let mut total_weight = 0.0;
+    let mut weighted_rel_gain = 0.0;
+
+    for obj in objectives {
+        let Some(res) = results.iter().find(|r| r.metric_id == obj.id) else {
+            continue;
+        };
+
+        let regression = -res.median_delta;
+        if let Some(tol) = obj.max_regression_tolerance {
+            if regression > tol {
+                return CandidateJudgment::Rejected {
+                    reason: RevertReason::ObjectiveRegression,
+                    failed_metric_id: Some(obj.id.clone()),
+                    observed_value: Some(res.cand_median),
+                    expected_or_baseline: Some(res.best_median),
+                    detail: format!(
+                        "paired A/B regression on '{}': median delta {:.4} (exceeded tolerance {:.4}; wins {}/{})",
+                        obj.id,
+                        res.median_delta,
+                        tol,
+                        res.wins,
+                        res.paired_deltas.len()
+                    ),
+                };
+            }
+        } else if regression > 0.0 && (res.paired_deltas.len() < 3 || res.losses >= res.wins) {
+            return CandidateJudgment::Rejected {
+                reason: RevertReason::ObjectiveRegression,
+                failed_metric_id: Some(obj.id.clone()),
+                observed_value: Some(res.cand_median),
+                expected_or_baseline: Some(res.best_median),
+                detail: format!(
+                    "paired A/B regression on '{}': {:.4} -> {:.4} (wins {}/{})",
+                    obj.id,
+                    res.best_median,
+                    res.cand_median,
+                    res.wins,
+                    res.paired_deltas.len()
+                ),
+            };
+        }
+
+        let meets_delta = (obj.min_delta > 0.0 && res.median_delta >= obj.min_delta)
+            || (obj.min_delta == 0.0 && res.median_delta > 0.0);
+        if meets_delta && res.wins > res.losses {
+            any_meaningful_gain = true;
+        }
+
+        let denom = res.best_median.abs().max(1e-9);
+        weighted_rel_gain += obj.weight * (res.median_delta / denom);
+        total_weight += obj.weight;
+    }
+
+    if !any_meaningful_gain || (total_weight > 0.0 && weighted_rel_gain <= 0.0) {
+        let primary = &objectives[0];
+        let primary_res = results.iter().find(|r| r.metric_id == primary.id);
+        let detail = if let Some(r) = primary_res {
+            format!(
+                "paired A/B verification rejected noisy gain on '{}': median_delta={:.4}, wins {}/{}",
+                r.metric_id,
+                r.median_delta,
+                r.wins,
+                r.paired_deltas.len()
+            )
+        } else {
+            "paired A/B verification rejected insufficient gain".to_string()
+        };
+        return CandidateJudgment::Rejected {
+            reason: RevertReason::InsufficientDelta,
+            failed_metric_id: Some(primary.id.clone()),
+            observed_value: primary_res.map(|r| r.cand_median),
+            expected_or_baseline: primary_res.map(|r| r.best_median),
+            detail,
+        };
+    }
+
+    CandidateJudgment::Promoted
 }
 
 #[derive(Debug, Clone)]
@@ -460,6 +695,20 @@ fn median(values: &[f64]) -> f64 {
     }
 }
 
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    if sorted.len() == 1 {
+        return sorted[0];
+    }
+    let pos = p.clamp(0.0, 1.0) * (sorted.len() - 1) as f64;
+    let lo = pos.floor() as usize;
+    let hi = pos.ceil() as usize;
+    let frac = pos - lo as f64;
+    sorted[lo] * (1.0 - frac) + sorted[hi] * frac
+}
+
 fn truncate_chars(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         s.to_string()
@@ -468,6 +717,18 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
         out.push_str("...");
         out
     }
+}
+
+pub fn excerpt_head_tail(s: &str, max_chars: usize) -> String {
+    let total = s.chars().count();
+    if total <= max_chars {
+        return s.to_string();
+    }
+    let head_len = (max_chars / 4).max(1);
+    let tail_len = max_chars.saturating_sub(head_len);
+    let head: String = s.chars().take(head_len).collect();
+    let tail: String = s.chars().skip(total.saturating_sub(tail_len)).collect();
+    format!("{head}\n... [truncated {} chars] ...\n{tail}", total.saturating_sub(max_chars))
 }
 
 #[cfg(test)]
@@ -523,5 +784,130 @@ mod tests {
             judge_candidate(&objs, &best, &good),
             CandidateJudgment::Promoted
         ));
+    }
+
+    #[test]
+    fn calibrate_noise_floors_raises_noisy_metric_and_preserves_deterministic() {
+        let mut objs = vec![
+            ObjectiveMetric {
+                id: "noisy_ops".into(),
+                command: "echo".into(),
+                builtin: None,
+                working_dir: None,
+                extract_json_path: Some("$.ops".into()),
+                extract_regex: None,
+                direction: Some(Direction::Maximize),
+                target: None,
+                target_ratio: None,
+                min_delta: 10.0,
+                min_delta_ratio: None,
+                max_regression_tolerance: None,
+                weight: 0.7,
+                trials: 3,
+                timeout_sec: 10,
+            },
+            ObjectiveMetric {
+                id: "det_score".into(),
+                command: "echo".into(),
+                builtin: None,
+                working_dir: None,
+                extract_json_path: Some("$.det".into()),
+                extract_regex: None,
+                direction: Some(Direction::Maximize),
+                target: None,
+                target_ratio: None,
+                min_delta: 5.0,
+                min_delta_ratio: None,
+                max_regression_tolerance: None,
+                weight: 0.3,
+                trials: 3,
+                timeout_sec: 10,
+            },
+        ];
+        let meas = vec![
+            ObjectiveMeasurement {
+                metric_id: "noisy_ops".into(),
+                trial_values: vec![100.0, 120.0, 140.0],
+                median: 120.0,
+            },
+            ObjectiveMeasurement {
+                metric_id: "det_score".into(),
+                trial_values: vec![50.0, 50.0, 50.0],
+                median: 50.0,
+            },
+        ];
+
+        let stats = calibrate_noise_floors(&mut objs, &meas, 1.5);
+        assert_eq!(stats.len(), 2);
+        // IQR of [100, 120, 140] = 20.0 -> floor = 20 * 1.5 = 30.0 > 10.0
+        assert!((objs[0].min_delta - 30.0).abs() < 1e-6);
+        assert!((objs[1].min_delta - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn judge_paired_ab_promotes_consistent_wins_and_rejects_noisy_splits() {
+        let objs = vec![ObjectiveMetric {
+            id: "ops".into(),
+            command: "echo".into(),
+            builtin: None,
+            working_dir: None,
+            extract_json_path: Some("$.ops".into()),
+            extract_regex: None,
+            direction: Some(Direction::Maximize),
+            target: Some(1000.0),
+            target_ratio: None,
+            min_delta: 20.0,
+            min_delta_ratio: None,
+            max_regression_tolerance: None,
+            weight: 1.0,
+            trials: 3,
+            timeout_sec: 10,
+        }];
+
+        let noisy = vec![PairedAbMetricResult {
+            metric_id: "ops".into(),
+            best_values: vec![100.0, 100.0, 100.0],
+            cand_values: vec![95.0, 100.0, 125.0],
+            paired_deltas: vec![-5.0, 0.0, 25.0],
+            median_delta: 0.0,
+            best_median: 100.0,
+            cand_median: 100.0,
+            wins: 1,
+            losses: 1,
+        }];
+        assert!(matches!(
+            judge_paired_ab(&objs, &noisy),
+            CandidateJudgment::Rejected {
+                reason: RevertReason::InsufficientDelta,
+                ..
+            }
+        ));
+
+        let real_win = vec![PairedAbMetricResult {
+            metric_id: "ops".into(),
+            best_values: vec![100.0, 102.0, 99.0],
+            cand_values: vec![150.0, 155.0, 148.0],
+            paired_deltas: vec![50.0, 53.0, 49.0],
+            median_delta: 50.0,
+            best_median: 100.0,
+            cand_median: 150.0,
+            wins: 3,
+            losses: 0,
+        }];
+        assert!(matches!(
+            judge_paired_ab(&objs, &real_win),
+            CandidateJudgment::Promoted
+        ));
+    }
+
+    #[test]
+    fn excerpt_head_tail_preserves_both_ends() {
+        let head = "HEADER_CONTEXT\n";
+        let middle = "x".repeat(500);
+        let tail = "\nASSERTION_ERROR: expected 42 got 0";
+        let full = format!("{head}{middle}{tail}");
+        let excerpt = excerpt_head_tail(&full, 160);
+        assert!(excerpt.contains("HEADER_CONTEXT"));
+        assert!(excerpt.contains("ASSERTION_ERROR: expected 42 got 0"));
     }
 }
