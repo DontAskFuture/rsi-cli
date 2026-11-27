@@ -6,25 +6,28 @@ Point `rsi evolve` at a repository, a behavioral spec, and correctness + perform
 
 ---
 
-## Key Features
+## Key Highlights
 
-- **Out-of-Tree Immutable Kernel (`~/.rsi/`):** Snapshots `rsi.yaml`, specs, and `protected_paths` with SHA-256 checksums before Step 1, locks protected files read-only (`0o444`) during synthesis, verifies integrity before evaluating, and enforces timeouts via Unix process-group kills.
-- **Statistical Reliability & In-Worktree Repair:**
-  - **Step-0 IQR Noise Calibration (`noise_calibration`):** Automatically raises `min_delta` above baseline benchmark spread (`IQR * noise_multiplier`) so runs do not hill-climb on jitter.
-  - **Paired Interleaved A/B Verification (`paired_ab_trials`):** Confirms every candidate win by running `best` and `candidate` back-to-back in alternating rounds (`A,B`, `B,A`, ...) before promotion.
-  - **Bounded Repair Loop (`max_repair_turns`):** Feeds head+tail blocker logs, exact failing Golden-Master inputs/outputs, and the candidate diff back into the same worktree before giving up and auto-reverting.
-- **Fast Onboarding & Visibility:** Preflight `rsi doctor` diagnostics, zero-LLM `rsi evolve --dry-run` baseline check, resumable runs (`rsi evolve --resume <run_id>`), and live streaming progress on `stderr` (`--quiet` to suppress).
+- **Verified Real-World Gains, Not Benchmark Noise:** Step-0 IQR noise-floor calibration automatically adjusts promotion thresholds above baseline jitter, and every winning candidate must pass alternating interleaved **paired A/B verification** against the current best commit before promotion.
+- **Self-Healing Candidates (`max_repair_turns`):** Near-miss optimizations that break a test, typecheck, or Golden-Master check get bounded in-worktree repair turns with head+tail blocker logs, failing input/output previews, and candidate diffs instead of being immediately discarded.
+- **Tamper-Proof Local Sandbox:** Runs an out-of-tree `~/.rsi/` immutable kernel over disposable `git worktree` sandboxes, locking `protected_paths` read-only (`0o444`) during synthesis, verifying SHA-256 digests before every evaluation, and enforcing timeouts with Unix process-group kills.
+- **Works on Legacy Repos with Zero Existing Tests:** Auto-bootstraps out-of-tree Golden-Master Eval Packs (`rsi bootstrap-eval`) for Python and TypeScript (`python_fn`, `ts_fn`, `cli_replay`, `http_replay`) without modifying the target repository until a verified win is ready.
+- **Fast Onboarding & Live Visibility:** Timeout-guarded `rsi doctor` environment diagnostics, zero-LLM `rsi evolve --dry-run` preflight baseline checks, live `stderr` step progress, and resumable runs (`rsi evolve --resume <run_id>`).
+- **BYO Subscription CLI or API Key + Flexible GitHub Delivery:** Uses customer-provided agent subscriptions (`agy_cli`, `claude_cli`, `codex_cli`, `gemini_cli`), direct LLM API keys (`anthropic_api`, `openai_api`, `gemini_api`), or custom `command` drivers—and toggles cleanly between **PR-based** (`--publish pull-request`, optional `--auto-merge`) and **Zero-PR** (`--publish zero-pr`) delivery.
+
+---
+
+## Architecture & Capabilities
+
 - **3-Layer Evaluation Architecture:**
   1. **Bring Your Own Eval (BYOE):** In-repo or external (`working_dir`) shell commands with `$RSI_WORKTREE` and `$RSI_RUN_DIR` injected.
   2. **Harness-Managed Wrappers (`eval.wrapper`):** `python_fn`, `ts_fn`, `cli_replay`, and `http_replay` with automatic Step-0 **Golden-Master (`golden_equivalence`)** capture + built-in `ops_per_sec`, `p50_ms`, `p95_ms`, and `peak_mem_mb` metrics and baseline-relative `target_ratio` / `min_delta_ratio` goals.
-  3. **Cold-Start Legacy Bootstrap (`rsi bootstrap-eval`):** Scans Python ASTs or TypeScript exports, synthesizes and live-probes `inputs.jsonl` against Step 0 out-of-tree without touching the target repository (and auto-bootstraps when `rsi evolve` runs without `rsi.yaml`).
-- **Customer-Provided Subscriptions & BYO API Keys:**
-  - Coding-agent CLI drivers: `agy_cli`, `claude_cli`, `codex_cli`, `gemini_cli`, `command`
-  - Direct API drivers: `anthropic_api`, `openai_api`, `gemini_api`
-- **Toggleable GitHub Delivery Modes:**
+  3. **Cold-Start Legacy Bootstrap (`rsi bootstrap-eval`):** Scans Python ASTs or TypeScript exports, synthesizes and live-probes `inputs.jsonl` against Step 0 out-of-tree (and auto-bootstraps when `rsi evolve` runs without `rsi.yaml`).
+- **GitHub Delivery Modes:**
   - **PR-Based (`--publish pull-request`, optional `--auto-merge`):** Squashes promoted steps onto `rsi/<run_id>`, pushes to `origin`, and opens a GitHub PR with the Baseline vs. Evolved scorecard.
   - **Zero-PR (`--publish zero-pr`):** Squashes promoted steps into a single commit and fast-forward pushes straight to trunk (`main`) with a `/compare/<base>...<head>` audit URL.
   - **Post-Hoc Publish (`rsi publish [<run_id>] --mode ...`):** Publish an earlier local run later as a PR, direct trunk push, branch, or tag.
+- **Ledger, Diffs & Triggers:** Persistent SQLite ledger (`~/.rsi/ledger.db`) paired with hidden Git refs (`refs/rsi/<run_id>/*`), clean net diffs via `rsi diff`, and scheduled/webhook triggers via `rsi watch`.
 
 ---
 
