@@ -110,6 +110,15 @@ rsi log [<run_id>] --only-promoted
 rsi watch --config rsi.yaml --port 7890
 ```
 
+### 5. Interactive Jupyter walkthrough (`AIEngineerNewsLetter`)
+
+Explore a complete real-world TypeScript evolution run (`141.18 → 6,443.00 ops/sec`, **45.6×** speedup) in [examples/ai-newsletter-eval/rsi_ai_newsletter_walkthrough.ipynb](./examples/ai-newsletter-eval/rsi_ai_newsletter_walkthrough.ipynb) (see [examples/ai-newsletter-eval/README.md](./examples/ai-newsletter-eval/README.md)):
+
+```bash
+uv run --with jupyterlab --with ipywidgets --with pyyaml \
+  jupyter lab examples/ai-newsletter-eval/rsi_ai_newsletter_walkthrough.ipynb
+```
+
 ---
 
 ## Repository Layout
@@ -117,7 +126,7 @@ rsi watch --config rsi.yaml --port 7890
 - `src/` — Rust CLI, kernel worktree/guard/evaluator, Golden-Master wrappers, AST/export bootstrapper, CLI & API synthesizer drivers, SQLite ledger, GitHub publisher, and watch scheduler
 - `examples/python-demo/` — Minimal Python evolution example
 - `examples/typescript-demo/` — Minimal TypeScript evolution example
-- `examples/ai-newsletter-eval/` — External eval config + inputs for optimizing `mergeWatchedModelReleases` via `ts_fn`
+- [examples/ai-newsletter-eval/](./examples/ai-newsletter-eval/README.md) — Interactive Jupyter walkthrough ([rsi_ai_newsletter_walkthrough.ipynb](./examples/ai-newsletter-eval/rsi_ai_newsletter_walkthrough.ipynb)), external eval config, and inputs for optimizing `mergeWatchedModelReleases` via `ts_fn`
 - `docs/DESIGN.md` — Detailed v1 architecture, `rsi.yaml` schema, SQLite/Git ref model, and v2 hosted canary roadmap
 - `tests/` — End-to-end integration tests for evolution loops, legacy wrappers/bootstrap, reliability/onboarding flows (repair loop, paired A/B, dry-run, resume, doctor), and PR / Zero-PR publish modes
 
